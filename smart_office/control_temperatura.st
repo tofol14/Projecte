@@ -1,38 +1,76 @@
-// Variables de zona morta i temperatura
+// BLOC 1: INICIALITZACIÓ I DEFINICIÓ DE VARIABLES
+VAR_INPUT
+    SetPointNodeRED : Real;  // Setpoint rebut de Node-RED
+    sensor_temp_jefe : Int;  // Entrada del sensor de Factory IO (%IW40)
+    temperatura_DB : "temperatura_cap_DB";  // Referència al DB de temperatura
+END_VAR
+
+VAR_OUTPUT
+    TemperaturaNodeRED : Real;  // Temperatura en graus per Node-RED
+END_VAR
+
 STATIC
-    EstemEnZonaMorta : Bool;    // Per controlar la histèresi de la zona morta
-    UltimaTemperaturaReal : Real;    // Per detectar canvis en la temperatura del sensor
-    TemperaturaReal : Real;    // Per emmagatzemar la temperatura actual del sensor
-    ValorSensor : Real;    // Per emmagatzemar el valor raw del sensor
-    valor_raw_sensor : Int;    // Per debug del valor directe del sensor
-    proporcio_debug : Real;    // Per debug de la proporció normalitzada
-    temp_real_debug : Real;    // Per debug de la temperatura real
-    setpoint_debug : Real;    // Per debug del setpoint
-    temp_entrada_pid : Real;    // Per debug de la temperatura que entra al PID
-    setpoint_entrada_pid : Real;    // Per debug del setpoint que entra al PID
-    TemperaturaSimulada : Real;    // Per simular la temperatura del sistema
-    TempsPID : Time;           // Per controlar el temps entre càlculs
-    UltimTemps : Time;         // Per calcular el delta de temps
-    DeltaTemps : Real;         // Per emmagatzemar el temps entre càlculs en segons
-    ProporcioSimulada : Real;  // Per la conversió de temperatura a valor de sensor
-    ValorSensorSimulat : Int;  // Valor simulat del sensor
-    TimerSimulacio {InstructionName := 'TON'} : TON;    // Timer per la simulació
-    TempsAnterior : Time;    // Per calcular el delta de temps
-    TempsActual : Time;      // Temps actual del cicle
-    TaxaEscalfament : Real;  // Taxa d'escalfament per la simulació
-    TaxaRefredament : Real;  // Taxa de refredament per la simulació
-    Proporcio : Real;        // Per la normalització
+    // Constants del sistema
+    TEMP_MIN : Real := 0.0;           // Temperatura mínima permesa (canviat de 15.0)
+    TEMP_MAX : Real := 50.0;          // Temperatura màxima permesa (canviat de 30.0)
+    ZONA_MORTA : Real := 0.3;         // Marge de zona morta pel control
+    HISTERESI : Real := 1.2;          // Factor d'histèresi
+    TEMPS_MINIM_CANVI : Time := T#180S; // Temps mínim entre canvis de mode
+    TAXA_ESCALFAMENT : Real := 0.1;    // Taxa d'escalfament simulada
+    TAXA_REFREDAMENT : Real := 0.05;   // Taxa de refredament simulada
+    
+    // Variables de control i estat
+    PrimeraExecucio : Bool := TRUE;   // Flag de primera execució
+    EstemEnZonaMorta : Bool;          // Control d'histèresi
+    ControlActiu : Bool;              // Estat del sistema
+    ModeFred : Bool;                  // Mode refrigeració actiu
+    ModeCalent : Bool;                // Mode calefacció actiu
+    ModeActual : String;              // Mode actual en text
+    
+    // Variables de temperatura i sensors
+    TemperaturaSimulada : Real;       // Temperatura simulada del sistema
+    UltimaTemperaturaReal : Real;     // Última lectura vàlida
+    TemperaturaReal : Real;           // Temperatura actual
+    TemperaturaEscalada : Real;       // Temperatura processada
+    ValorSensor : Real;               // Valor raw del sensor
+    Valor_Raw_Sensor : Int;           // Valor enter del sensor
+    
+    // Variables de temps i simulació
+    TempsActual : Time;               // Temps actual
+    TempsAnterior : Time;             // Temps anterior
+    DeltaTemps : Real;                // Interval de temps
+    ProporcioSimulada : Real;         // Proporció per simulació
+    ValorSensorSimulat : Int;         // Valor simulat
+    
+    // Variables de sortida i control
+    SortidaPID : Real;                // Sortida del controlador PID
+    SortidaEscalada : Real;           // Sortida escalada (0-100%)
+    
+    // Variables HMI/Monitorització
+    HMI_TemperaturaActual : Real;     // Temperatura actual per HMI
+    HMI_SetPoint : Real;              // SetPoint actual per HMI
+    HMI_ModeActual : String;          // Mode de funcionament per HMI
+    HMI_PercentatgeSortida : Real;    // Percentatge sortida per HMI
+
+{REGION 'Declaració de variables PID'}
+VAR_INPUT
+    EN : Bool;              // Habilitació del PID
+    Setpoint : Real;        // Valor desitjat de temperatura
+    Input : Real;           // Valor actual de temperatura
+END_VAR
+
+VAR_OUTPUT
+    Output : Real;          // Sortida del controlador PID
+END_VAR
 
 // 1. PROCESSAMENT DEL SENSOR DE TEMPERATURA
 // Inicialització de variables de simulació
-IF #TempSimulada = 0.0 THEN
-    #TempSimulada := #TempMin;
-    #TaxaEscalfament := 0.1;    // Reduïm la taxa per fer-ho més suau
-    #TaxaRefredament := 0.05;   // Reduïm la taxa per fer-ho més suau
-    #UltimaTemperaturaReal := #TempMin;
-    #TemperaturaSimulada := #TempMin;
+IF #PrimeraExecucio THEN
+    #PrimeraExecucio := FALSE;
+    #TemperaturaSimulada := #TEMP_MIN;
+    #UltimaTemperaturaReal := #TEMP_MIN;
+    #TemperaturaEscalada := #TEMP_MIN;
     #TempsAnterior := T#0MS;
-    #TemperaturaEscalada := #TempMin;  // Inicialitzem també la temperatura escalada
 END_IF;
 
 // 2. CONTROL PRINCIPAL ON/OFF
@@ -71,40 +109,58 @@ IF #TimerSimulacio.Q THEN
 END_IF;
 
 // Processar valor del sensor abans de la simulació
-#ValorSensor := INT_TO_REAL("sensor_temp_jefe");
-#valor_raw_sensor := REAL_TO_INT(#ValorSensor);
+#ValorSensor := INT_TO_REAL(#sensor_temp_jefe);
+#Valor_Raw_Sensor := #sensor_temp_jefe;
 
 // Normalització i escalat del sensor actual
 #Proporcio := #ValorSensor / 27648.0;
-#TemperaturaReal := #Proporcio * (#TempMax - #TempMin) + #TempMin;
+#TemperaturaReal := #Proporcio * (#TEMP_MAX - #TEMP_MIN) + #TEMP_MIN;
+#TemperaturaEscalada := #TemperaturaReal;  // Utilitzem la temperatura real en lloc de la simulada
+
+// Assignar al DB de temperatura utilitzant la referència
+#temperatura_DB.TemperaturaEscalada := #TemperaturaEscalada;
+
+// Validació del SetPoint
+IF #SetPointNodeRED < #TEMP_MIN THEN
+    #SetPointNodeRED := #TEMP_MIN;
+ELSIF #SetPointNodeRED > #TEMP_MAX THEN
+    #SetPointNodeRED := #TEMP_MAX;
+END_IF;
+
+// Debug dels valors - Actualitzem sempre
+#proporcio_debug := #Proporcio;
+#temp_real_debug := #TemperaturaReal;
+#setpoint_debug := #SetPointNodeRED;
+#temp_entrada_pid := #TemperaturaEscalada;
+#setpoint_entrada_pid := #SetPointNodeRED;
 
 // Simulació del comportament tèrmic sempre activa
 IF #ControlActiu THEN
     IF #ModeFred THEN
         // Mode refrigeració - La sortida del PID refreda
-        #TemperaturaSimulada := #TemperaturaSimulada - (#SortidaEscalada * #TaxaEscalfament * #DeltaTemps);
+        #TemperaturaSimulada := #TemperaturaSimulada - (#SortidaEscalada * #TAXA_ESCALFAMENT * #DeltaTemps);
     ELSE
         // Mode calefacció - La sortida del PID escalfa
-        #TemperaturaSimulada := #TemperaturaSimulada + (#SortidaEscalada * #TaxaEscalfament * #DeltaTemps);
+        #TemperaturaSimulada := #TemperaturaSimulada + (#SortidaEscalada * #TAXA_ESCALFAMENT * #DeltaTemps);
     END_IF;
     
     // Simular pèrdua natural de temperatura
-    IF #TemperaturaSimulada > #TempMin THEN
-        #TemperaturaSimulada := #TemperaturaSimulada - (#TaxaRefredament * #DeltaTemps);
+    IF #TemperaturaSimulada > #TEMP_MIN THEN
+        #TemperaturaSimulada := #TemperaturaSimulada - (#TAXA_REFREDAMENT * #DeltaTemps);
     END_IF;
     
     // Limitar la temperatura simulada
-    IF #TemperaturaSimulada < #TempMin THEN
-        #TemperaturaSimulada := #TempMin;
-    ELSIF #TemperaturaSimulada > #TempMax THEN
-        #TemperaturaSimulada := #TempMax;
+    IF #TemperaturaSimulada < #TEMP_MIN THEN
+        #TemperaturaSimulada := #TEMP_MIN;
+    ELSIF #TemperaturaSimulada > #TEMP_MAX THEN
+        #TemperaturaSimulada := #TEMP_MAX;
     END_IF;
     
     // Actualitzar temperatura escalada amb la simulada
     #TemperaturaEscalada := #TemperaturaSimulada;
     
     // Convertir temperatura simulada a format sensor (0-27648)
-    #ProporcioSimulada := (#TemperaturaSimulada - #TempMin) / (#TempMax - #TempMin);
+    #ProporcioSimulada := (#TemperaturaSimulada - #TEMP_MIN) / (#TEMP_MAX - #TEMP_MIN);
     #ValorSensorSimulat := REAL_TO_INT(#ProporcioSimulada * 27648.0);
     
     // Assignar al tag del sensor
@@ -140,45 +196,55 @@ IF #ControlActiu THEN
     END_IF;
     
     // 4. CONTROL PID I SORTIDA
-    // Validació inicial del SetPoint
-    IF #SetPointNodeRED < #TempMin THEN
-        #SetPointNodeRED := #TempMin;
-    ELSIF #SetPointNodeRED > #TempMax THEN
-        #SetPointNodeRED := #TempMax;
-    END_IF;
-    
-    // Assignació directa al PID
-    "Control_temperatura_oficina_cap".Setpoint := #SetPointNodeRED;
-    "Control_temperatura_oficina_cap".Input := #TemperaturaEscalada;
-    
-    // Control de zona morta amb histèresi
-    IF ABS(#TemperaturaEscalada - #SetPointNodeRED) <= #ZONA_MORTA THEN
-        #SortidaPID := 0.0;
-        #EstemEnZonaMorta := TRUE;
-    ELSIF ABS(#TemperaturaEscalada - #SetPointNodeRED) >= (#ZONA_MORTA * 1.2) THEN
-        #EstemEnZonaMorta := FALSE;
-    END_IF;
-    
-    IF NOT #EstemEnZonaMorta THEN
-        // Execució del PID
-        "Control_temperatura_oficina_cap"();
+    IF #ClimaOn THEN
+        // Configuració del PID
+        "Control_temperatura_oficina_cap"(
+            EN := #ClimaOn,
+            Setpoint := #SetPointNodeRED,
+            Input := #TemperaturaEscalada
+        );
         
-        // Processar sortida del PID
-        #SortidaPID := "Control_temperatura_oficina_cap".Output;
-        
-        // Gestió mode fred
-        IF #ModeFred THEN
-            #SortidaPID := -#SortidaPID;
+        // Execució del PID si estem fora de la zona morta
+        IF NOT #EstemEnZonaMorta THEN
+            #SortidaPID := "Control_temperatura_oficina_cap".Output;
+            // Gestió mode fred
+            IF #ModeFred THEN
+                #SortidaPID := -#SortidaPID;
+            END_IF;
+            
+            // Limitació de la sortida amb més granularitat
+            IF #SortidaPID < 0.0 THEN
+                #SortidaEscalada := 0.0;
+            ELSIF #SortidaPID > 100.0 THEN
+                #SortidaEscalada := 100.0;
+            ELSE
+                #SortidaEscalada := #SortidaPID;
+            END_IF;
         END_IF;
-        
-        // Limitació de la sortida amb més granularitat
-        IF #SortidaPID < 0.0 THEN
-            #SortidaEscalada := 0.0;
-        ELSIF #SortidaPID > 100.0 THEN
-            #SortidaEscalada := 100.0;
-        ELSE
-            #SortidaEscalada := #SortidaPID;
-        END_IF;
+    ELSE
+        "Control_temperatura_oficina_cap"(EN := FALSE);
     END_IF;
 END_IF;
+
+// BLOC 5: PROCESSAMENT DE SORTIDES
+// Convertir temperatura simulada a format sensor
+#ProporcioSimulada := (#TemperaturaSimulada - #TEMP_MIN) / (#TEMP_MAX - #TEMP_MIN);
+#ValorSensorSimulat := REAL_TO_INT(#ProporcioSimulada * 27648.0);
+
+// Assignar al tag del sensor (simulació)
+"sensor_temp_jefe" := #ValorSensorSimulat;
+
+// Actualitzar sortides físiques
+#refredament := #ControlActiu AND #ModeFred AND (#SortidaEscalada > 10.0);
+#calefaccio := #ControlActiu AND #ModeCalent AND (#SortidaEscalada > 10.0);
+
+// BLOC 6: DIAGNÒSTIC I MONITORITZACIÓ
+// Variables per monitorització
+#HMI_TemperaturaActual := #TemperaturaSimulada;
+#HMI_SetPoint := #SetPointNodeRED;
+#HMI_ModeActual := #ModeActual;
+#HMI_PercentatgeSortida := #SortidaEscalada;
+
+// Actualitzar temperatura per Node-RED
+#Temperatura := #TemperaturaEscalada;
 
