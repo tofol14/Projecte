@@ -1,0 +1,240 @@
+// ======================
+// Control de Cortines 
+// ======================
+
+// Inicialització
+IF #Firstscan THEN
+    #Estat := 0;
+    #sPosicioActual_Passos := 0;
+    #VelocitatActual := 0.0;
+    #Error := FALSE;
+    #Firstscan := FALSE;
+    #TempsPolsActual := #TempsPolsBase;
+    #ObrirAutomatic := FALSE;
+    #TancarAutomatic := FALSE;
+    #PosicioDesitjadaInterna := 0.0;
+    #UltimaPosicioDesitjada := 0.0;
+    #ControlActiu := TRUE;
+    #HisteresiLlum := 50.0;  // Valor d'histèresi en lux (ajustar segons necessitat)
+    #estat_cel := 0;        // Inicialitzar a cel clar per defecte
+    #timestamp_actual := T#0MS;  // Inicialitzar timestamps
+    #timestamp_anterior := T#0MS;
+    #RadiacioSolar := 0.0;  // Inicialitzar radiació solar
+    #ModeManualAutomatic := TRUE;  // Començar en mode manual per defecte
+END_IF;
+
+// Llegir i processar sensor de lluminositat (mateix que control_llums)
+#raw_sensor_llum := "sensor_jefe"; // Entrada analògica del sensor de llum
+#normalitzat_sensor_llum := NORM_X(MIN := 0.0, VALUE := #raw_sensor_llum, MAX := 27648);
+#llum_local := SCALE_X(MIN := 0.0, VALUE := #normalitzat_sensor_llum, MAX := 6000.0); // Escala a lux
+
+// Actualitzar timestamps i verificar validesa de les dades meteorològiques
+#timestamp_anterior := #timestamp_actual;
+#timestamp_actual := #temps;  // Variable de temps
+#dades_valides := TIME_TO_INT(#timestamp_actual - #timestamp_anterior) <= 30000; // 30 segons en ms
+
+// Actualitzar dades meteorològiques si són vàlides
+IF #dades_valides THEN
+    #estat_cel := #estat_cel_entrada;      // Actualitzar estat del cel
+    #RadiacioSolar := #radiacio_entrada;   // Actualitzar radiació solar
+END_IF;
+
+// 1. Determinar Posició Desitjada
+#PosicioDesitjadaInterna := 0.0; // Reset
+
+IF #ControlActiu THEN
+    IF #ModeManualAutomatic THEN
+        // Mode Manual (Node-RED)
+        IF #ObrirDesDeNodeRED THEN
+            #PosicioDesitjadaInterna := 100.0;
+            #EnMoviment := TRUE;  // Activar moviment immediatament
+        ELSIF #TancarDesDeNodeRED THEN
+            #PosicioDesitjadaInterna := 0.0;
+            #EnMoviment := TRUE;  // Activar moviment immediatament
+        ELSE
+            #PosicioDesitjadaInterna := #PosicioManual; //Manté la posició manual
+        END_IF;
+        
+        // Forçar canvi d'estat si hi ha moviment
+        IF #EnMoviment AND #Estat = 0 THEN
+            #Estat := 10;  // Passar a preparar moviment
+        END_IF;
+    ELSE
+        // Mode Automàtic (Sensor Local + API Meteorològica)
+        
+        // Control principal basat en sensor local
+        IF #llum_local > (500.0 + #HisteresiLlum) THEN
+            #PosicioDesitjadaInterna := 0.0; // Tancar - massa llum
+        ELSIF #llum_local < (150.0 - #HisteresiLlum) THEN
+            #PosicioDesitjadaInterna := 100.0; // Obrir - poca llum
+        ELSIF #llum_local > 150.0 AND #llum_local < 500.0 THEN
+            #PosicioDesitjadaInterna := 50.0; // Posició Intermèdia
+        END_IF;
+          // Control horari i meteorològic
+        IF TIME_TO_DINT(#temps) >= 0 AND TIME_TO_DINT(#temps) < 25200000 THEN  // 7h = 7*3600*1000 = 25200000ms
+            // Durant la nit, mantenir tancat
+            #PosicioDesitjadaInterna := 0.0;
+        ELSE
+            // Control durant el dia (07:00-00:00)
+            // Ajust segons radiació solar (actualització horària)
+            IF #dades_valides THEN
+                IF #RadiacioSolar > 800.0 THEN
+                    // Radiació molt alta - protegir de la calor
+                    #PosicioDesitjadaInterna := 0.0;
+                ELSIF #RadiacioSolar < 200.0 AND #estat_cel = 2 THEN
+                    // Poc sol i molt núvol - maximitzar llum
+                    #PosicioDesitjadaInterna := 100.0;
+                END_IF;
+            END_IF;
+        END_IF;
+    END_IF;
+END_IF;
+
+// Si la posició desitjada ha canviat significativament, reinicia la rampa
+IF ABS(#PosicioDesitjadaInterna - #UltimaPosicioDesitjada) > 5.0 THEN // 5% de canvi
+    #RampaActiva := FALSE;
+    #ComptePasos := 0;
+    #VelocitatActual := 0.0;
+END_IF;
+
+#UltimaPosicioDesitjada := #PosicioDesitjadaInterna;
+
+// 2. Convertir a Passos
+#PosicioDesitjadaPassos := LREAL_TO_DINT(#PosicioDesitjadaInterna / 100.0 * DINT_TO_LREAL(#CarreraTotal_Passos));
+
+// 3. Aplicar Límits
+IF #PosicioDesitjadaPassos < 0 THEN
+    #PosicioDesitjadaPassos := 0;
+ELSIF #PosicioDesitjadaPassos > #CarreraTotal_Passos THEN
+    #PosicioDesitjadaPassos := #CarreraTotal_Passos;
+END_IF;
+
+// 4. Màquina d'Estats
+IF #HabilitarControl THEN
+    CASE #Estat OF
+        0:  // Repòs
+            #EnMoviment := FALSE;
+            #VelocitatActual := 0.0;
+            #RampaActiva := FALSE;
+            #ComptePasos := 0;
+            IF #sPosicioActual_Passos <> #PosicioDesitjadaPassos THEN
+                #Estat := 10; // Passar a Preparar Moviment
+            END_IF;
+            
+        10: // Preparar Moviment
+            #EnMoviment := TRUE;
+            #DireccioAssignada := (#PosicioDesitjadaPassos > #sPosicioActual_Passos) XOR NOT #DireccioPerObrir;
+            #VelocitatActual := 10.0; // Velocitat inicial
+            #RampaActiva := TRUE;
+            #ComptePasos := 0;
+            #Estat := 20; // Passar a Moviment
+            #sTimerPols(IN := TRUE,
+                       PT := #PT);
+            #PasActual := FALSE;
+            
+        20: // Moviment
+            // En mode manual, ja hem gestionat els botons al principi
+            IF NOT #ModeManualAutomatic THEN
+                // Control horari i meteorològic
+                IF TIME_TO_DINT(#temps) >= 0 AND TIME_TO_DINT(#temps) < 25200000 THEN  // 7h = 7*3600*1000 = 25200000ms
+                    // Durant la nit, mantenir tancat
+                    #PosicioDesitjadaInterna := 0.0;
+                ELSE
+                    // Control durant el dia (07:00-00:00)
+                    // Ajust segons radiació solar (actualització horària)
+                    IF #dades_valides THEN
+                        IF #RadiacioSolar > 800.0 THEN
+                            // Radiació molt alta - protegir de la calor
+                            #PosicioDesitjadaInterna := 0.0;
+                        ELSIF #RadiacioSolar < 200.0 AND #estat_cel = 2 THEN
+                            // Poc sol i molt núvol - maximitzar llum
+                            #PosicioDesitjadaInterna := 100.0;
+                        END_IF;
+                    END_IF;
+                END_IF;
+            END_IF;
+            
+            #sTimerPols(IN := TRUE,
+                       PT := #TempsPolsActual);
+            
+            IF #sTimerPols.Q THEN
+                // Reset timer for next pulse
+                #sTimerPols.IN := FALSE;
+                #sTimerPols(IN := TRUE,
+                           PT := #TempsPolsActual);
+                
+                // Generar pols i actualitzar direcció
+                #PasActual := NOT #PasActual;
+                #MotorPols := #PasActual;
+                #MotorDireccio := #DireccioAssignada;
+                
+                // Actualitzar posició
+                IF #DireccioAssignada = #DireccioPerObrir THEN
+                    IF #sPosicioActual_Passos < #CarreraTotal_Passos THEN
+                        #sPosicioActual_Passos := #sPosicioActual_Passos + 1;
+                    END_IF;
+                ELSE
+                    IF #sPosicioActual_Passos > 0 THEN
+                        #sPosicioActual_Passos := #sPosicioActual_Passos - 1;
+                    END_IF;
+                END_IF;
+                
+                // Assegurar que la posició està dins dels límits
+                IF #sPosicioActual_Passos < 0 THEN
+                    #sPosicioActual_Passos := 0;
+                ELSIF #sPosicioActual_Passos > #CarreraTotal_Passos THEN
+                    #sPosicioActual_Passos := #CarreraTotal_Passos;
+                END_IF;
+                
+                // Control de Rampa
+                IF #RampaActiva THEN
+                    #ComptePasos := #ComptePasos + 1;
+                    IF #ComptePasos >= #PasosPerRampa THEN
+                        #ComptePasos := 0;
+                        IF #sPosicioActual_Passos < (#PosicioDesitjadaPassos + #CarreraTotal_Passos / 10) AND
+                           #sPosicioActual_Passos > (#PosicioDesitjadaPassos - #CarreraTotal_Passos / 10) THEN
+                            // Desaccelerar
+                            #VelocitatActual := #VelocitatActual - #Desacceleracio;
+                            IF #VelocitatActual <= 10.0 THEN
+                                #VelocitatActual := 10.0;
+                                #RampaActiva := FALSE; // Fi de la rampa
+                            END_IF;
+                        ELSE
+                            // Accelerar
+                            #VelocitatActual := #VelocitatActual + #Acceleracio;
+                            IF #VelocitatActual >= 100.0 THEN
+                                #VelocitatActual := 100.0;
+                            END_IF;
+                        END_IF;
+                        
+                        IF #VelocitatActual <> 0.0 THEN
+                            #TempsPolsActual := DINT_TO_TIME(REAL_TO_DINT(1000.0 / #VelocitatActual));
+                        ELSE
+                            #TempsPolsActual := #TempsPolsBase;
+                        END_IF;
+                    END_IF;
+                END_IF;
+                
+                // Comprovar posició desitjada
+                IF #sPosicioActual_Passos = #PosicioDesitjadaPassos THEN
+                    #Estat := 0; // Aturar moviment
+                    #MotorPols := FALSE;
+                    #EnMoviment := FALSE;
+                    #RampaActiva := FALSE;
+                    #ComptePasos := 0;
+                END_IF;
+            END_IF;
+    END_CASE;
+ELSE
+    #MotorPols := FALSE;
+    #EnMoviment := FALSE;
+    #RampaActiva := FALSE;
+    #ComptePasos := 0;
+END_IF;
+
+// 5. Calcular Posició Actual
+IF #CarreraTotal_Passos <> 0 THEN
+    #PosicioActual := DINT_TO_REAL(#sPosicioActual_Passos) * 100.0 / DINT_TO_REAL(#CarreraTotal_Passos);
+ELSE
+    #PosicioActual := 0.0;
+END_IF;

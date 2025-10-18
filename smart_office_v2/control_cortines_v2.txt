@@ -1,0 +1,159 @@
+// ======================
+// Control de Cortines 
+// ======================
+
+// Configuració bàsica
+#TempsPolsBase := T#10MS;    // Velocitat més alta - 100 polsos per segon (abans 50)
+#TempsPolsMinim := T#10MS;   // Velocitat màxima
+#TempsPolsMaxim := T#50MS;   // Velocitat mínima
+#ZonaRampa := 200;           // Passos per accelerar/desaccelerar
+
+// Variables per rampes
+#TempsPolsActual := #TempsPolsBase;
+#DistanciaObjectiu := 0;
+#VelocitatActual := 0.0;      // Nova variable per la velocitat actual
+
+// Assignar valors d'entrada
+#estat_cel := #estat_cel_entrada;
+#RadiacioSolar := #radiacio_entrada;
+#hora_actual := #hora_entrada;
+
+// Inicialització (només una vegada)
+IF #Firstscan THEN
+    #Firstscan := FALSE;
+    #sPosicioActual_Passos := 0;
+    #PosicioDesitjadaPassos := 0;
+    #ModeManualAutomatic := TRUE;  // Començar en mode manual
+END_IF;
+
+// Determinar posició objectiu
+IF #ModeManualAutomatic THEN
+    // Mode Manual: usar slider
+    #PosicioDesitjadaPassos := LREAL_TO_DINT(#PosicioManual / 100.0 * DINT_TO_LREAL(#CarreraTotal_Passos));
+ELSE
+    // Mode Automàtic: Control horari, radiació solar i estat del cel
+    IF #hora_actual < 7 OR #hora_actual >= 23 THEN
+        // Durant la nit (23:00 - 07:00): Tancar cortines
+
+         #PosicioDesitjadaPassos := 0;
+     ELSE
+         // Durant el dia: Control per radiació i estat del cel
+        
+       // Prioritat 1: Radiació alta (>800): Sempre tancat independentment de l'estat del cel
+         
+        // Prioritat 1: Radiació alta (>800): Sempre tancat independentment de l'estat del cel
+        IF #RadiacioSolar > 800.0 THEN
+             #PosicioDesitjadaPassos := 0;
+        
+        // Prioritat 2: Control segons l'estat del cel i nivell de radiació
+     
+        // Prioritat 2: Control segons l'estat del cel i nivell de radiació
+         ELSIF #estat_cel = 2 THEN
+             // Molt ennuvolat (Clouds): Sempre 100% obert
+             #PosicioDesitjadaPassos := #CarreraTotal_Passos;
+            
+           
+         ELSIF #estat_cel = 1 THEN
+            // Parcialment ennuvolat
+            // Parcialment ennuvolat
+             IF #RadiacioSolar <= 500.0 THEN
+                // Radiació mitjana: 50% obert
+                // Radiació baixa: 75% obert
+                // Radiació baixa: 100% obert
+               // Radiació baixa: 100% obert
+                    
+         #PosicioDesitjadaPassos := #CarreraTotal_Passos;
+             ELSE
+                // Radiació entre 500 i 800: 75% obert
+               // Radiació entre 500 i 800: 75% obert
+                 #PosicioDesitjadaPassos := LREAL_TO_DINT(0.75 * DINT_TO_LREAL(#CarreraTotal_Passos));
+            ELSE
+                // Radiació alta (>800): Ja tractat a la primera condició (cortines tancades)
+                // Aquest cas no s'executarà mai, però s'inclou per claredat
+                #PosicioDesitjadaPassos := 0;
+             END_IF;
+            
+         ELSIF #estat_cel = 0 THEN
+             // Cel clar (Sunny)
+             IF #RadiacioSolar <= 500.0 THEN
+                // Radiació baixa: 75% obert
+                 #PosicioDesitjadaPassos := LREAL_TO_DINT(0.75 * DINT_TO_LREAL(#CarreraTotal_Passos));
+             ELSIF #RadiacioSolar <= 800.0 THEN
+              // Radiació mitjana: 50% obert
+                 #PosicioDesitjadaPassos := LREAL_TO_DINT(0.50 * DINT_TO_LREAL(#CarreraTotal_Passos));
+            ELSE
+                // Radiació alta (>800): Ja tractat a la primera condició (cortines tancades)
+                // Aquest cas no s'executarà mai, però s'inclou per claredat
+               #PosicioDesitjadaPassos := 0;
+             END_IF;
+         END_IF;
+     END_IF;
+END_IF;
+
+// Control de moviment
+IF #HabilitarControl THEN
+    IF #sPosicioActual_Passos <> #PosicioDesitjadaPassos THEN
+        // Calcular distància a l'objectiu
+        #DistanciaObjectiu := ABS(#PosicioDesitjadaPassos - #sPosicioActual_Passos);
+        
+        // Determinar direcció
+        #DireccioAssignada := (#PosicioDesitjadaPassos > #sPosicioActual_Passos) XOR NOT #DireccioPerObrir;
+        
+        // Calcular velocitat i temps entre polsos (rampes)
+        IF #DistanciaObjectiu <= #ZonaRampa THEN
+            // Rampa de desacceleració
+            #VelocitatActual := #VelocitatActual - #Desacceleracio;
+            IF #VelocitatActual < 10.0 THEN
+                #VelocitatActual := 10.0;
+            END_IF;
+        ELSIF #DistanciaObjectiu >= (#CarreraTotal_Passos - #ZonaRampa) THEN
+            // Rampa d'acceleració
+            #VelocitatActual := #VelocitatActual + #Acceleracio;
+            IF #VelocitatActual > 100.0 THEN
+                #VelocitatActual := 100.0;
+            END_IF;
+        ELSE
+            // Velocitat màxima (zona central del recorregut)
+            #VelocitatActual := 100.0;
+        END_IF;
+        
+        // Convertir velocitat a temps entre polsos
+        IF #VelocitatActual <> 0.0 THEN
+            #TempsPolsActual := DINT_TO_TIME(REAL_TO_DINT(1000.0 / #VelocitatActual));
+        ELSE
+            #TempsPolsActual := #TempsPolsBase;
+        END_IF;
+        
+        // Generar polsos
+        #sTimerPols(IN := TRUE, PT := #TempsPolsActual);
+        IF #sTimerPols.Q THEN
+            #sTimerPols(IN := FALSE, PT := #TempsPolsActual);
+            #sTimerPols(IN := TRUE, PT := #TempsPolsActual);
+            #PasActual := NOT #PasActual;
+            #MotorPols := #PasActual;
+            #MotorDireccio := #DireccioAssignada;
+            
+            // Actualitzar posició
+            IF #DireccioAssignada = #DireccioPerObrir THEN
+                IF #sPosicioActual_Passos < #CarreraTotal_Passos THEN
+                    #sPosicioActual_Passos := #sPosicioActual_Passos + 1;
+                END_IF;
+            ELSE
+                IF #sPosicioActual_Passos > 0 THEN
+                    #sPosicioActual_Passos := #sPosicioActual_Passos - 1;
+                END_IF;
+            END_IF;
+        END_IF;
+    ELSE
+        #MotorPols := FALSE;
+    END_IF;
+ELSE
+    #MotorPols := FALSE;
+END_IF;
+
+// Calcular posició actual en percentatge
+IF #CarreraTotal_Passos <> 0 THEN
+    #PosicioActual := DINT_TO_REAL(#sPosicioActual_Passos) * 100.0 / DINT_TO_REAL(#CarreraTotal_Passos);
+ELSE
+    #PosicioActual := 0.0;
+END_IF;
